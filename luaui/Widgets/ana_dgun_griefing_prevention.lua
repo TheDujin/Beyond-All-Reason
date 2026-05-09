@@ -1,13 +1,18 @@
-local gadget = gadget ---@type Gadget
---[[
-TODO: how to deal with jammed high ground units?
-- One idea: track ghosts by tracking when ghost-leaving units enter LOS
-  - To remove ghost: either add new callin from Engine notifying when ghost is removed (too much complexity?)...
-  - Or track when the ghost's position comes in LOS again and whether that unit is still there (has to be checked every frame, seems costly)
+local widget = widget ---@type Widget
 
+--[[
+	DGun Griefing Prevention
+
+	Widget-side port of the old unsynced gadget.
+	It watches DGun commands, estimates whether the beam would threaten allied
+	metal, and sends analytics when the shot looks suspicious.
+
+	Note: widget UnitDamaged callins do not expose attacker metadata, so the
+	"recently damaged allied units" heuristic treats any nearby allied damage as
+	a frontline signal.
 ]]
 
-function gadget:GetInfo()
+function widget:GetInfo()
 	return {
 		name    = "DGun Griefing Prevention",
 		desc    = "Logs DGun commands that intersect allied units and echoes a warning when the threatened metal value is high enough.",
@@ -15,15 +20,12 @@ function gadget:GetInfo()
 		date    = "2026-05-01",
 		license = "GNU GPL, v2 or later",
 		layer   = 0,
-        version = "1.3",
+		version = "1.3",
 		enabled = true,
 	}
 end
 
-if gadgetHandler:IsSyncedCode() then
-	return false
-end
-
+-- Localized Spring API for performance
 local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitTeam = Spring.GetUnitTeam
 local spGetUnitDefID = Spring.GetUnitDefID
@@ -67,7 +69,14 @@ local nextContactPruneFrame = CACHE_PRUNE_INTERVAL
 local USE_WG_ANALYTICS = true -- if false, Spring.Echo intead. Useful for debugging and that's about it
 local recentlyDamagedAlliedUnits = {}
 
-function gadget:Initialize()
+local myAllyTeamID
+
+local function RefreshPlayerState()
+	myAllyTeamID = spGetMyAllyTeamID()
+end
+
+function widget:Initialize()
+	RefreshPlayerState()
 end
 
 local function GetAllyTeamID(teamID)
@@ -75,26 +84,24 @@ local function GetAllyTeamID(teamID)
 	return allyTeamID
 end
 
-function gadget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer)
 	if not unitTeam or unitTeam == gaiaTeamID then
 		return
 	end
 
-	local myAllyTeam = spGetMyAllyTeamID()
-	if not myAllyTeam or GetAllyTeamID(unitTeam) ~= myAllyTeam then
+	local currentAllyTeam = myAllyTeamID or spGetMyAllyTeamID()
+	if not currentAllyTeam or GetAllyTeamID(unitTeam) ~= currentAllyTeam then
 		return
 	end
 
-	if attackerTeam and attackerTeam ~= gaiaTeamID and GetAllyTeamID(attackerTeam) ~= myAllyTeam then
-		local unitX, unitY, unitZ = spGetUnitPosition(unitID)
-		if unitX then
-			recentlyDamagedAlliedUnits[unitID] = {
-				x = unitX,
-				y = unitY,
-				z = unitZ,
-				expiresFrame = spGetGameFrame() + ALLY_DAMAGE_WINDOW,
-			}
-		end
+	local unitX, unitY, unitZ = spGetUnitPosition(unitID)
+	if unitX then
+		recentlyDamagedAlliedUnits[unitID] = {
+			x = unitX,
+			y = unitY,
+			z = unitZ,
+			expiresFrame = spGetGameFrame() + ALLY_DAMAGE_WINDOW,
+		}
 	end
 end
 
@@ -223,7 +230,7 @@ local function HandleDGunAllyRisk(teamID, startX, startY, startZ, endX, endY, en
 	if threatenedAllyMetal == 0 then
 		return false
 	end
-	
+
 	return false, string.format("Only %d metal threatened (inconsequential)", threatenedAllyMetal)
 end
 
@@ -266,46 +273,6 @@ local function HasKnownEnemyNearby(teamID, targetX, targetY, targetZ)
 	return false
 end
 
--- Cache units that leave radar briefly so they count as visible enemy presence
--- This allows players to attempt dguns even if radar contact is lost.
-function gadget:UnitLeftRadar(unitID, unitTeam, allyTeam, unitDefID)
-	if not unitTeam or unitTeam == gaiaTeamID then
-		return
-	end
-
-	if allyTeam and GetAllyTeamID(unitTeam) == allyTeam then
-		return
-	end
-
-	local unitX, unitY, unitZ = spGetUnitPosition(unitID)
-	if not unitX then
-		return
-	end
-
-	-- Note: we want to track the team of the unit that left radar.
-	-- 'allyTeam' in this context is actually which team that lost track of a radar contact
-		AddExpiringUnitContact(unitX, unitY, unitZ, spGetGameFrame())
-end
-
--- Cache seismic detections briefly so they count as visible enemy presence.
-function gadget:UnitSeismicPing(positionX, positionY, positionZ, strength, allyTeam, unitID, unitDefID)
-	AddExpiringUnitContact(positionX, positionY, positionZ, spGetGameFrame())
-end
-
-function gadget:GameFrame(currentFrame)
-	if currentFrame < nextContactPruneFrame then
-		return
-	end
-
-	if #contactsCache > 0 then
-		PruneExpiredCaches(currentFrame)
-	end
-
-	while nextContactPruneFrame <= currentFrame do
-		nextContactPruneFrame = nextContactPruneFrame + CACHE_PRUNE_INTERVAL
-	end
-end
-
 local function SendAnalyticsEvent(eventType, eventData)
 	if USE_WG_ANALYTICS and WG and WG.Analytics and WG.Analytics.SendEvent then
 		WG.Analytics.SendEvent(eventType, eventData)
@@ -320,7 +287,7 @@ local function GetGameID()
 end
 
 -- Observe DGun commands and echo only. We do not block the command anymore.
-function gadget:UnitCommand(unitID, unitDefID, teamID, cmdID, cmdParams, cmdOptions, cmdTag, playerID, fromSynced, fromLua)
+function widget:UnitCommand(unitID, unitDefID, teamID, cmdID, cmdParams, cmdOptions, cmdTag, playerID, fromSynced, fromLua)
 	if cmdID ~= CMD_DGUN then
 		return
 	end
@@ -336,10 +303,10 @@ function gadget:UnitCommand(unitID, unitDefID, teamID, cmdID, cmdParams, cmdOpti
 	end
 
 	local targetX, targetY, targetZ
-	if #cmdParams == 1 and cmdParams[1] > 0 then
+	if cmdParams and #cmdParams == 1 and cmdParams[1] > 0 then
 		targetX, targetY, targetZ = spGetUnitPosition(cmdParams[1])
 	else
-		targetX, targetY, targetZ = cmdParams[1], cmdParams[2], cmdParams[3]
+		targetX, targetY, targetZ = cmdParams and cmdParams[1], cmdParams and cmdParams[2], cmdParams and cmdParams[3]
 	end
 	if not targetX then
 		return
@@ -382,6 +349,53 @@ function gadget:UnitCommand(unitID, unitDefID, teamID, cmdID, cmdParams, cmdOpti
 		gameID = GetGameID(),
 		player = GetPlayerName(playerID),
 	})
+end
 
+-- Cache units that leave radar briefly so they count as visible enemy presence
+-- This allows players to attempt dguns even if radar contact is lost.
+function widget:UnitLeftRadar(unitID, unitTeam, allyTeam, unitDefID)
+	if not unitTeam or unitTeam == gaiaTeamID then
+		return
+	end
 
+	local unitAllyTeam = unitID and Spring.GetUnitAllyTeam(unitID)
+	if unitAllyTeam and myAllyTeamID and unitAllyTeam == myAllyTeamID then
+		return
+	end
+
+	if allyTeam and GetAllyTeamID(unitTeam) == allyTeam then
+		return
+	end
+
+	local unitX, unitY, unitZ = spGetUnitPosition(unitID)
+	if not unitX then
+		return
+	end
+
+	-- Note: we want to track the team of the unit that left radar.
+	-- 'allyTeam' in this context is actually which team that lost track of a radar contact
+	AddExpiringUnitContact(unitX, unitY, unitZ, spGetGameFrame())
+end
+
+-- Cache seismic detections briefly so they count as visible enemy presence.
+function widget:UnitSeismicPing(positionX, positionY, positionZ, strength, allyTeam, unitID, unitDefID)
+	AddExpiringUnitContact(positionX, positionY, positionZ, spGetGameFrame())
+end
+
+function widget:GameFrame(currentFrame)
+	if currentFrame < nextContactPruneFrame then
+		return
+	end
+
+	if #contactsCache > 0 then
+		PruneExpiredCaches(currentFrame)
+	end
+
+	while nextContactPruneFrame <= currentFrame do
+		nextContactPruneFrame = nextContactPruneFrame + CACHE_PRUNE_INTERVAL
+	end
+end
+
+function widget:PlayerChanged()
+	RefreshPlayerState()
 end

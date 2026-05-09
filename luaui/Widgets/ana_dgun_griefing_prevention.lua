@@ -1,16 +1,11 @@
 local widget = widget ---@type Widget
 
 --[[
-	DGun Griefing Prevention
-
-	Widget-side port of the old unsynced gadget.
-	It watches DGun commands, estimates whether the beam would threaten allied
-	metal, and sends analytics when the shot looks suspicious.
-
-	Note: widget UnitDamaged callins do not expose attacker metadata, so the
-	"recently damaged allied units" heuristic treats any nearby allied damage as
-	a frontline signal.
-]]
+TODO: how to deal with jammed high ground units?
+- One idea: track ghosts by tracking when ghost-leaving units enter LOS
+  - To remove ghost: either add new callin from Engine notifying when ghost is removed (too much complexity?)...
+  - Or track when the ghost's position comes in LOS again and whether that unit is still there (has to be checked every frame, seems costly)
+  ]]
 
 function widget:GetInfo()
 	return {
@@ -84,6 +79,7 @@ local function GetAllyTeamID(teamID)
 	return allyTeamID
 end
 
+-- TODO when converting back to gadget, gadget:UnitDamaged should verify that enemy action damaged allies
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer)
 	if not unitTeam or unitTeam == gaiaTeamID then
 		return
@@ -368,6 +364,7 @@ function widget:UnitLeftRadar(unitID, unitTeam, allyTeam, unitDefID)
 	end
 
 	local unitX, unitY, unitZ = spGetUnitPosition(unitID)
+	Spring.Echo(unitX, unitY, unitZ)
 	if not unitX then
 		return
 	end
